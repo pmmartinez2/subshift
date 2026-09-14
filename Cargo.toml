@@ -1,0 +1,10 @@
+[package]
+name = "subshift"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Shift SRT subtitle timestamps by a fixed offset"
+
+[[bin]]
+name = "subshift"
+path = "src/main.rs"
