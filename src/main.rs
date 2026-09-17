@@ -28,6 +28,14 @@ fn main() {
         }
     };
 
+    let errors = validate_structure(&input);
+    if !errors.is_empty() {
+        for e in &errors {
+            eprintln!("error: {}", e);
+        }
+        std::process::exit(1);
+    }
+
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for line in input.lines() {
@@ -52,12 +60,11 @@ fn read_input(path: Option<&str>) -> Result<String, String> {
     }
 }
 
-/// Rewrites a subtitle cue timing line ("00:00:01,000 --> 00:00:04,000"),
-/// leaving every other line (index, text, blank separator) untouched.
-fn shift_line(line: &str, offset_ms: i64) -> String {
-    let Some(arrow) = line.find("-->") else {
-        return line.to_string();
-    };
+/// Splits a timing line into its start timestamp, end timestamp, and
+/// whatever trails the end timestamp (e.g. VobSub-style position tags),
+/// without checking that the timestamps themselves are valid.
+fn split_timing_line(line: &str) -> Option<(&str, &str, &str)> {
+    let arrow = line.find("-->")?;
     let start_part = line[..arrow].trim();
     let after_arrow = &line[arrow + 3..];
     let after_trimmed = after_arrow.trim_start();
@@ -65,6 +72,22 @@ fn shift_line(line: &str, offset_ms: i64) -> String {
         .find(char::is_whitespace)
         .unwrap_or(after_trimmed.len());
     let (end_part, rest) = after_trimmed.split_at(split_at);
+    Some((start_part, end_part, rest))
+}
+
+fn is_timing_line(line: &str) -> bool {
+    match split_timing_line(line) {
+        Some((start, end, _)) => parse_timestamp(start).is_some() && parse_timestamp(end).is_some(),
+        None => false,
+    }
+}
+
+/// Rewrites a subtitle cue timing line ("00:00:01,000 --> 00:00:04,000"),
+/// leaving every other line (index, text, blank separator) untouched.
+fn shift_line(line: &str, offset_ms: i64) -> String {
+    let Some((start_part, end_part, rest)) = split_timing_line(line) else {
+        return line.to_string();
+    };
 
     let (Some(start), Some(end)) = (parse_timestamp(start_part), parse_timestamp(end_part)) else {
         return line.to_string();
@@ -76,6 +99,66 @@ fn shift_line(line: &str, offset_ms: i64) -> String {
         format_timestamp(shift_ms(end, offset_ms)),
         rest
     )
+}
+
+/// Walks the input as a sequence of SRT cues (index line, timing line, one
+/// or more text lines, blank separator) and collects a human-readable error
+/// for every place the structure breaks down, tagged with the 1-based line
+/// number so the caller can find it in the original file.
+fn validate_structure(input: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+    let mut lines = input.lines().enumerate().map(|(i, l)| (i + 1, l)).peekable();
+
+    while let Some(&(_, line)) = lines.peek() {
+        if line.trim().is_empty() {
+            lines.next();
+            continue;
+        }
+
+        let (index_no, index_line) = lines.next().unwrap();
+        if index_line.trim().parse::<u64>().is_err() {
+            errors.push(format!(
+                "line {}: expected a cue number, found '{}'",
+                index_no, index_line
+            ));
+        }
+
+        match lines.next() {
+            Some((_, timing_line)) if is_timing_line(timing_line) => {}
+            Some((timing_no, timing_line)) => {
+                errors.push(format!(
+                    "line {}: expected a timing line (HH:MM:SS,mmm --> HH:MM:SS,mmm), found '{}'",
+                    timing_no, timing_line
+                ));
+            }
+            None => {
+                errors.push(format!(
+                    "line {}: cue '{}' is missing a timing line",
+                    index_no,
+                    index_line.trim()
+                ));
+                break;
+            }
+        }
+
+        let mut has_text = false;
+        while let Some(&(_, l)) = lines.peek() {
+            if l.trim().is_empty() {
+                break;
+            }
+            has_text = true;
+            lines.next();
+        }
+        if !has_text {
+            errors.push(format!(
+                "line {}: cue '{}' has no subtitle text",
+                index_no,
+                index_line.trim()
+            ));
+        }
+    }
+
+    errors
 }
 
 fn shift_ms(ts_ms: i64, offset_ms: i64) -> i64 {
@@ -152,5 +235,50 @@ mod tests {
             shift_line(line, 1000),
             "00:00:02,000 --> 00:00:05,000 X1:40 X2:640"
         );
+    }
+
+    #[test]
+    fn accepts_well_formed_srt() {
+        let srt = "1\n00:00:01,000 --> 00:00:04,000\nHello\n\n2\n00:00:05,000 --> 00:00:06,000\nWorld\n";
+        assert_eq!(validate_structure(srt), Vec::<String>::new());
+    }
+
+    #[test]
+    fn accepts_multi_line_cue_text_and_missing_trailing_blank() {
+        let srt = "1\n00:00:01,000 --> 00:00:04,000\nHello\nthere\n\n2\n00:00:05,000 --> 00:00:06,000\nWorld";
+        assert_eq!(validate_structure(srt), Vec::<String>::new());
+    }
+
+    #[test]
+    fn flags_non_numeric_cue_index() {
+        let srt = "one\n00:00:01,000 --> 00:00:04,000\nHello\n";
+        let errors = validate_structure(srt);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("line 1:"));
+    }
+
+    #[test]
+    fn flags_malformed_timing_line() {
+        let srt = "1\n00:00:01,000 -> 00:00:04,000\nHello\n";
+        let errors = validate_structure(srt);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("line 2:"));
+    }
+
+    #[test]
+    fn flags_cue_with_no_text() {
+        let srt = "1\n00:00:01,000 --> 00:00:04,000\n\n2\n00:00:05,000 --> 00:00:06,000\nWorld\n";
+        let errors = validate_structure(srt);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("line 1:"));
+        assert!(errors[0].contains("no subtitle text"));
+    }
+
+    #[test]
+    fn flags_cue_missing_timing_line_at_eof() {
+        let srt = "1\n";
+        let errors = validate_structure(srt);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("missing a timing line"));
     }
 }

@@ -26,6 +26,12 @@ subshift <offset_ms> [file]
 
 Output always goes to stdout, so redirect it to save the result.
 
+Before shifting anything, `subshift` checks that the input is structured as
+a sequence of SRT cues (a cue number, a timing line, one or more lines of
+text, and a blank separator). If a cue number isn't numeric, a timing line
+doesn't parse, or a cue has no text, it prints one error per problem to
+stderr with the 1-based line number and exits without writing any output.
+
 ### Examples
 
 Subtitles start 1.5 seconds too late - delay them further is wrong, so pull
@@ -61,5 +67,6 @@ cargo build --release
 
 Handles the standard `HH:MM:SS,mmm --> HH:MM:SS,mmm` cue line, including the
 optional positioning tags (`X1:... X2:...`) some encoders append after the
-end timestamp. Format validation, frame-rate-based resync, and batch
-processing of multiple files are not implemented yet.
+end timestamp, and rejects input that doesn't follow the SRT cue structure.
+Frame-rate-based resync (`--scale`), `.vtt` support, and batch processing of
+multiple files are not implemented yet.
