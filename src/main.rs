@@ -1,26 +1,56 @@
 use std::io::{Read, Write};
 
+fn print_usage_and_exit() -> ! {
+    eprintln!("usage: subshift <offset_ms> [--scale <factor>] [file]");
+    eprintln!("  offset_ms  milliseconds to add to every timestamp (may be negative)");
+    eprintln!("  --scale    multiply every timestamp by this factor before the offset is added;");
+    eprintln!("             use target_fps / source_fps to retime for a frame-rate change");
+    eprintln!("  file       .srt file to read; omit or pass '-' to read stdin");
+    std::process::exit(2);
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 || args.len() > 3 {
-        eprintln!("usage: subshift <offset_ms> [file]");
-        eprintln!("  offset_ms  milliseconds to add to every timestamp (may be negative)");
-        eprintln!("  file       .srt file to read; omit or pass '-' to read stdin");
-        std::process::exit(2);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let mut scale: f64 = 1.0;
+    let mut positional: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--scale" {
+            let Some(value) = args.get(i + 1) else {
+                eprintln!("error: --scale requires a value");
+                std::process::exit(2);
+            };
+            scale = match value.parse() {
+                Ok(v) if v > 0.0 => v,
+                _ => {
+                    eprintln!("error: --scale must be a positive number, got '{}'", value);
+                    std::process::exit(2);
+                }
+            };
+            i += 2;
+        } else {
+            positional.push(args[i].as_str());
+            i += 1;
+        }
     }
 
-    let offset_ms: i64 = match args[1].parse() {
+    if positional.is_empty() || positional.len() > 2 {
+        print_usage_and_exit();
+    }
+
+    let offset_ms: i64 = match positional[0].parse() {
         Ok(v) => v,
         Err(_) => {
             eprintln!(
                 "error: offset must be an integer number of milliseconds, got '{}'",
-                args[1]
+                positional[0]
             );
             std::process::exit(2);
         }
     };
 
-    let input = match read_input(args.get(2).map(|s| s.as_str())) {
+    let input = match read_input(positional.get(1).copied()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -39,7 +69,7 @@ fn main() {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for line in input.lines() {
-        let shifted = shift_line(line, offset_ms);
+        let shifted = shift_line(line, scale, offset_ms);
         if let Err(e) = writeln!(out, "{}", shifted) {
             eprintln!("error: could not write output: {}", e);
             std::process::exit(1);
@@ -84,7 +114,7 @@ fn is_timing_line(line: &str) -> bool {
 
 /// Rewrites a subtitle cue timing line ("00:00:01,000 --> 00:00:04,000"),
 /// leaving every other line (index, text, blank separator) untouched.
-fn shift_line(line: &str, offset_ms: i64) -> String {
+fn shift_line(line: &str, scale: f64, offset_ms: i64) -> String {
     let Some((start_part, end_part, rest)) = split_timing_line(line) else {
         return line.to_string();
     };
@@ -95,8 +125,8 @@ fn shift_line(line: &str, offset_ms: i64) -> String {
 
     format!(
         "{} --> {}{}",
-        format_timestamp(shift_ms(start, offset_ms)),
-        format_timestamp(shift_ms(end, offset_ms)),
+        format_timestamp(shift_ms(start, scale, offset_ms)),
+        format_timestamp(shift_ms(end, scale, offset_ms)),
         rest
     )
 }
@@ -161,8 +191,9 @@ fn validate_structure(input: &str) -> Vec<String> {
     errors
 }
 
-fn shift_ms(ts_ms: i64, offset_ms: i64) -> i64 {
-    (ts_ms + offset_ms).max(0)
+fn shift_ms(ts_ms: i64, scale: f64, offset_ms: i64) -> i64 {
+    let scaled = (ts_ms as f64 * scale).round() as i64;
+    (scaled + offset_ms).max(0)
 }
 
 /// Parses "HH:MM:SS,mmm" into total milliseconds.
@@ -211,30 +242,47 @@ mod tests {
     #[test]
     fn shifts_cue_line_forward_and_backward() {
         let line = "00:00:01,000 --> 00:00:04,000";
-        assert_eq!(shift_line(line, 1500), "00:00:02,500 --> 00:00:05,500");
-        assert_eq!(shift_line(line, -500), "00:00:00,500 --> 00:00:03,500");
+        assert_eq!(shift_line(line, 1.0, 1500), "00:00:02,500 --> 00:00:05,500");
+        assert_eq!(shift_line(line, 1.0, -500), "00:00:00,500 --> 00:00:03,500");
     }
 
     #[test]
     fn clamps_at_zero_instead_of_going_negative() {
         let line = "00:00:01,000 --> 00:00:04,000";
-        assert_eq!(shift_line(line, -5000), "00:00:00,000 --> 00:00:00,000");
+        assert_eq!(shift_line(line, 1.0, -5000), "00:00:00,000 --> 00:00:00,000");
     }
 
     #[test]
     fn leaves_non_timing_lines_alone() {
-        assert_eq!(shift_line("1", 1000), "1");
-        assert_eq!(shift_line("Hello there", 1000), "Hello there");
-        assert_eq!(shift_line("", 1000), "");
+        assert_eq!(shift_line("1", 1.0, 1000), "1");
+        assert_eq!(shift_line("Hello there", 1.0, 1000), "Hello there");
+        assert_eq!(shift_line("", 1.0, 1000), "");
     }
 
     #[test]
     fn preserves_trailing_position_tags() {
         let line = "00:00:01,000 --> 00:00:04,000 X1:40 X2:640";
         assert_eq!(
-            shift_line(line, 1000),
+            shift_line(line, 1.0, 1000),
             "00:00:02,000 --> 00:00:05,000 X1:40 X2:640"
         );
+    }
+
+    #[test]
+    fn scales_timestamps_before_applying_offset() {
+        // 25 fps track that was authored as if it were 23.976 fps: stretch
+        // every timestamp by 25/23.976 to match the faster frame rate.
+        let line = "00:01:00,000 --> 00:02:00,000";
+        assert_eq!(
+            shift_line(line, 25.0 / 23.976, 0),
+            "00:01:02,563 --> 00:02:05,125"
+        );
+    }
+
+    #[test]
+    fn combines_scale_and_offset() {
+        let line = "00:00:10,000 --> 00:00:20,000";
+        assert_eq!(shift_line(line, 2.0, 500), "00:00:20,500 --> 00:00:40,500");
     }
 
     #[test]

@@ -16,12 +16,17 @@ touched: cue numbers, blank lines, and subtitle text pass through unchanged.
 ## Usage
 
 ```
-subshift <offset_ms> [file]
+subshift <offset_ms> [--scale <factor>] [file]
 ```
 
 - `offset_ms` - milliseconds to add to every timestamp. Negative values move
   subtitles earlier. Timestamps are clamped at `00:00:00,000` so they never
   go negative.
+- `--scale` - multiply every timestamp by this factor before the offset is
+  added. Useful when the subtitles drift further out of sync the longer the
+  video runs, which usually means they were authored for a different frame
+  rate. Compute the factor as `target_fps / source_fps`; for example
+  `25 / 23.976` stretches a film-rate track to match a PAL release.
 - `file` - path to an `.srt` file. Omit it, or pass `-`, to read from stdin.
 
 Output always goes to stdout, so redirect it to save the result.
@@ -39,6 +44,13 @@ them earlier by 1500 ms:
 
 ```
 subshift -1500 movie.srt > movie.synced.srt
+```
+
+Subtitles were timed for a 23.976 fps release but the video is the 25 fps
+PAL version, so every cue needs to stretch, not just shift:
+
+```
+subshift 0 --scale 1.042708 movie.srt > movie.synced.srt
 ```
 
 Read from a pipe instead of a file, useful when the subtitles come from
@@ -68,5 +80,6 @@ cargo build --release
 Handles the standard `HH:MM:SS,mmm --> HH:MM:SS,mmm` cue line, including the
 optional positioning tags (`X1:... X2:...`) some encoders append after the
 end timestamp, and rejects input that doesn't follow the SRT cue structure.
-Frame-rate-based resync (`--scale`), `.vtt` support, and batch processing of
-multiple files are not implemented yet.
+Supports both a fixed millisecond offset and a linear `--scale` factor for
+frame-rate resync. `.vtt` support and batch processing of multiple files are
+not implemented yet.
